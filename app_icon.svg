@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  C盘垃圾清理工具 应用图标  V2.2.1
+  设计：蓝色渐变背景 + 白色粗体 "C" + 右下角绿色闪光徽章
+  寓意：C 盘 + 清理后焕新闪亮
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3b82f6"/>
+      <stop offset="1" stop-color="#1e3a8a"/>
+    </linearGradient>
+    <linearGradient id="cFill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#e5e7eb"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 圆角方形背景 -->
+  <rect x="8" y="8" width="240" height="240" rx="48" ry="48" fill="url(#bg)"/>
+
+  <!-- 白色 C 字母（开口朝右） -->
+  <path d="M 185 61 A 88 88 0 1 0 185 195 L 160 166 A 50 50 0 1 1 160 90 Z"
+        fill="url(#cFill)"/>
+
+  <!-- 右下角绿色闪光徽章（清理完成/焕新） -->
+  <g transform="translate(196,196)">
+    <circle r="26" fill="#10b981" stroke="#ffffff" stroke-width="4"/>
+    <path d="M 0 -14 L 4 -4 L 14 0 L 4 4 L 0 14 L -4 4 L -14 0 L -4 -4 Z" fill="#ffffff"/>
+  </g>
+</svg>
