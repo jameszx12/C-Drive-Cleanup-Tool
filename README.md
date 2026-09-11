@@ -75,6 +75,13 @@
 ### 运行已打包版本（推荐）
 从 [Releases](../../releases) 下载 `C-Drive-Cleanup-Tool-v4.1.0.exe`（即 C盘清理工具 v4.1.0），双击运行。程序会请求管理员权限（因为需要清理系统目录），请点击「是」。首次运行若被 Windows SmartScreen 拦截，选择「仍要运行」即可（本工具无任何恶意行为）。
 
+### 报毒说明（误报）
+部分杀软/浏览器可能把 exe 标记为病毒或阻止下载，这是**误报**，原因：
+1. 程序未购买代码签名证书（个人项目），SmartScreen 会对无签名的新程序弹蓝框——点「更多信息」→「仍要运行」即可；
+2. PyInstaller 打包的程序常被杀软启发式（`!ml` 后缀即机器学习误判）误伤，本项目已做针对性优化：禁用 UPX 加壳、写入完整版本元数据，Defender 本地扫描无威胁。
+
+不放心可自行校验：Release 页附了 SHA256，本地执行 `Get-FileHash <exe> -Algorithm SHA256` 对比一致即为官方原包；也可直接用源码运行（见下节），完全透明。
+
 ### 从源码运行
 1. 双击 `run.bat`（使用本机 miniconda 环境，已带 tkinter + customtkinter）即可运行。
    或手动执行（需要带 tkinter 的 Python 3.10+，本机默认 python 无 tkinter）：

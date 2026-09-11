@@ -36,7 +36,10 @@ REM ---- 2. 打包（onefile + UAC 提权 + 内置图标 + 排除 PIL）----
 REM  main.py 顶层导入 config/theme/rules/engine/widgets/dialogs/app，
 REM  均在项目根目录，PyInstaller 自动跟随，无需 --paths。
 echo [2/3] 开始打包...
-"%PY%" --onefile --windowed --uac-admin --name "C盘清理工具" --icon "app_icon.ico" --hidden-import customtkinter --hidden-import darkdetect --exclude-module PIL --exclude-module Pillow --exclude-module numpy --exclude-module matplotlib --add-data "icons;icons" --distpath "dist" --workpath "build" --specpath "." --noconfirm "main.py"
+REM 误报说明：--noupx（UPX 加壳是杀软启发式的重灾区，体积换信任）；
+REM  --version-file 写入公司/产品/版本号元数据（无元数据的裸 exe 更易被 ML 误判）。
+REM  若仍被报毒，属 PyInstaller 通用误报，见 README「报毒说明」节。
+"%PY%" --onefile --windowed --uac-admin --noupx --clean --name "C盘清理工具" --icon "app_icon.ico" --version-file "version_info.txt" --hidden-import customtkinter --hidden-import darkdetect --exclude-module PIL --exclude-module Pillow --exclude-module numpy --exclude-module matplotlib --add-data "icons;icons" --distpath "dist" --workpath "build" --specpath "." --noconfirm "main.py"
 if errorlevel 1 (
   echo [失败] 打包出错，请查看上方报错信息。
   pause
