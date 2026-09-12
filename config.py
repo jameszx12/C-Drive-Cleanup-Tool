@@ -12,7 +12,7 @@ import theme as _theme
 
 APP_NAME = "C盘垃圾清理工具"
 AUTHOR = "zx"
-VERSION = "v4.1.0"
+VERSION = "v4.3.0"
 
 FONT_FAMILY = "Microsoft YaHei UI"   # Windows 系统内置中文字体，清晰锐利
 MONO_FAMILY = "Consolas"              # 等宽字体，用于路径显示
@@ -51,6 +51,10 @@ _TOKEN_ALIAS = {
     "C_TEXT_FAINT":    "TEXT_4",
     "C_TEXT_4":        "TEXT_4",
     "C_HL":            "HL",
+    # v4.3.0：particles 渐变三段别名（该模块保留供性能测试，缺失会 AttributeError）
+    "C_BG_TOP":        "BG",
+    "C_BG_MID":        "BG_ALT",
+    "C_BG_BOT":        "SURFACE",
 }
 
 

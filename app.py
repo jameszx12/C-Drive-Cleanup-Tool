@@ -15,9 +15,11 @@ v4.0 界面重构（设计系统驱动）
 """
 import os
 import sys
+import queue
 import threading
 import tkinter as tk
 import tkinter.messagebox as mb
+from concurrent.futures import ThreadPoolExecutor
 import customtkinter as ctk
 
 import config
@@ -30,9 +32,10 @@ from widgets import (make_glass_card, make_card, draw_card_shell, bind_hover,
                      GlassButton, glass_btn, ui_icon, rule_icon_photo,
                      make_badge, Tooltip, NavItem, StatCard, SegmentedControl,
                      SectionTitle, EmptyState, ProgressBar, Toggle, Dropdown,
-                     style_popup)
-from engine import (scan_rule, clean_files, filter_files_by_selection,
-                    open_in_explorer)
+                     style_popup, animate_card_entrance, make_skeleton_cards,
+                     start_skeleton_shimmer, set_anim_busy)
+from engine import (scan_rule, scan_rules_parallel, clean_files,
+                    filter_files_by_selection, open_in_explorer)
 from rules import build_rules
 from icons import get_app_icon
 from glass import apply_window_backdrop
@@ -59,7 +62,15 @@ SidebarItem = NavItem
 class CleanerApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title(f"{APP_NAME} · {AUTHOR} {VERSION}")
+        # v4.3.0：标题栏更干净（作者/版本移到界面内展示）；设置任务栏/标题图标
+        self.title(f"{APP_NAME} {VERSION}")
+        try:
+            _base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+            _ico = os.path.join(_base, "app_icon.ico")
+            if os.path.isfile(_ico):
+                self.iconbitmap(_ico)
+        except Exception:
+            pass
         self._init_window_geometry()
         self.cfg = load_config()
         self.theme_pref = self.cfg.get("theme", "dark")   # 用户偏好：light/dark/auto
@@ -92,6 +103,23 @@ class CleanerApp(ctk.CTk):
         self._cols = 2
         self._max_cols_cfg = 2
         self._col_width = 480
+        # v4.2 流畅度：图标加载共享线程池（原来每张卡一个线程，40+ 线程争抢），
+        # 待建卡队列 + 分批刷新（每帧最多 6 张，主线程不被建卡淹没），
+        # 骨架屏占位（点击扫描瞬间即有反馈，不再“冻住”）。
+        self._icon_executor = ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="icon")
+        self._pending_cards = []      # 已扫完待建卡的 rule（仅主线程触碰）
+        self._flush_job = None        # 分批建卡的 after 句柄
+        self._scan_done = 0
+        self._scan_total = 0
+        self._skeleton_host = None
+        self._skeleton_stop = None
+        # v4.2 线程安全：后台线程绝不直接碰 Tk（after 跨线程会
+        # RuntimeError/死锁），只往 queue 里放结果，主线程定时来取。
+        self._scan_queue = None
+        self._scan_gen = 0            # 扫描代际（防止旧轮询串台）
+        self._clean_queue = None
+        self._clean_gen = 0
 
         self._build_shell()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -249,9 +277,10 @@ class CleanerApp(ctk.CTk):
         row.pack(anchor="w", pady=(14, 0))
 
         # 应用标识：圆角方块 + 线性图标（不用 emoji，保证跨设备一致）
+        # v4.3.0：胶囊底加深（0.26→0.34），品牌蓝在深色底上不再发灰
         badge = ctk.CTkLabel(
             row, text="", width=42, height=42, corner_radius=T.R.MD,
-            fg_color=_mix_color(config.C_GLASS_2, config.C_PRIMARY, 0.26))
+            fg_color=_mix_color(config.C_GLASS_2, config.C_PRIMARY, 0.34))
         badge.pack(side="left", padx=(0, T.SP.MD))
         logo = ui_icon("empty", 26)
         if logo is not None:
@@ -400,6 +429,9 @@ class CleanerApp(ctk.CTk):
         try:
             if self._closing or not self.winfo_exists():
                 return
+            # v4.3.0：扫描/清理中不重建列表（搜索框此时已禁用，此为兜底）
+            if self.scanning or self.cleaning:
+                return
             self._search_text = self.search_var.get().strip().lower()
             self._apply_visible_rules()
             self._refresh_sel_buttons()
@@ -460,13 +492,13 @@ class CleanerApp(ctk.CTk):
         core.pack(side="left")
         self.btn_scan = glass_btn(core, "开始扫描", self.start_scan,
                                   accent=config.C_PRIMARY, kind="lg",
-                                  parent_bg=config.C_GLASS_2,
+                                  parent_bg=config.C_GLASS_2, solid=True,
                                   icon="scan", icon_size=19)
         self.btn_scan.pack(side="left", padx=(0, T.SP.SM))
 
         self.btn_clean = glass_btn(core, "清理选中", self.start_clean,
                                    accent=config.C_WARN, kind="lg",
-                                   parent_bg=config.C_GLASS_2,
+                                   parent_bg=config.C_GLASS_2, solid=True,
                                    icon="clean", icon_size=19)
         self.btn_clean.pack(side="left", padx=(0, T.SP.SM))
 
@@ -760,16 +792,16 @@ class CleanerApp(ctk.CTk):
         inner.place(relx=0.5, rely=0.5, anchor="center", y=-16)
         self._welcome_inner = inner
 
-        # 品牌区：图标胶囊 + 光晕环
+        # 品牌区：图标胶囊 + 光晕环（v4.3.0：底色加深，图标更醒目）
         brand = ctk.CTkFrame(inner, fg_color="transparent")
         brand.pack(pady=(0, T.SP.LG))
         ring = ctk.CTkLabel(
             brand, text="", width=84, height=84, corner_radius=42,
-            fg_color=_mix_color(config.C_BG, config.C_PRIMARY, 0.13))
+            fg_color=_mix_color(config.C_BG, config.C_PRIMARY, 0.18))
         ring.pack()
         icon_holder = ctk.CTkLabel(
             ring, text="", width=64, height=64, corner_radius=T.R.XL,
-            fg_color=_mix_color(config.C_GLASS, config.C_PRIMARY, 0.22))
+            fg_color=_mix_color(config.C_GLASS, config.C_PRIMARY, 0.32))
         icon_holder.place(relx=0.5, rely=0.5, anchor="center")
         img = ui_icon("empty", 34)
         if img is not None:
@@ -811,7 +843,7 @@ class CleanerApp(ctk.CTk):
 
             ic = ctk.CTkLabel(step, text="", width=48, height=48,
                               corner_radius=T.R.MD,
-                              fg_color=_mix_color(config.C_GLASS, color, 0.26))
+                              fg_color=_mix_color(config.C_GLASS, color, 0.34))
             ic.pack(pady=(T.SP.XL, T.SP.MD))
             s_img = ui_icon(icon, 22)
             if s_img is not None:
@@ -823,7 +855,7 @@ class CleanerApp(ctk.CTk):
                          wraplength=164).pack(pady=(T.SP.SM, 0))
 
         glass_btn(inner, "开始扫描", self.start_scan, accent=config.C_PRIMARY,
-                  kind="lg", icon="scan", icon_size=19).pack()
+                  kind="lg", icon="scan", icon_size=19, solid=True).pack()
 
     # ---------- 状态栏 ----------
     def _build_status_bar(self):
@@ -1069,7 +1101,7 @@ class CleanerApp(ctk.CTk):
         except Exception:
             pass
 
-    # ---------- 扫描 ----------
+    # ---------- 扫描（v4.2：多核并行 + 骨架屏 + 分批建卡 + 确定性进度） ----------
     def start_scan(self):
         if self.scanning or self.cleaning:
             return
@@ -1077,6 +1109,7 @@ class CleanerApp(ctk.CTk):
         self._cancel_requested = False   # v2.6：重置取消标志
         self._cancel_event.clear()
         self._set_controls(False)
+        set_anim_busy(True)  # v4.2：忙时 hover/按钮动画降级，主线程让给建卡+滚动
         self.has_scanned = False
         self.summary_label.configure(text="扫描中…", text_color=config.C_WARN)
         self.metric_label.configure(text="—", text_color=config.C_TEXT_3)
@@ -1086,43 +1119,215 @@ class CleanerApp(ctk.CTk):
         self.list_container.rowconfigure(0, weight=0)
         self.row_widgets.clear()
         self._sel_state.clear()
+        self._pending_cards = []
+        self._scan_done = 0
+        self._scan_total = len(self.rules)
+        # v4.2.1：记录规则原始顺序。并行扫描完成顺序随机（谁先扫完谁先建卡），
+        # 收尾时按此顺序重排卡片，保证每次扫描结果排序一致。
+        self._rule_order = {id(r): i for i, r in enumerate(self.rules)}
+        self._cancel_flush_job()
         self._refresh_sel_buttons()
         self._set_status("正在扫描 C 盘垃圾文件（含第三方应用）…", config.C_PRIMARY)
-        self._start_progress_flow()
+        # 确定性进度（0 → 按完成规则数推进），比纯“流动条”更可感知、更不焦虑；
+        # 流动动画只在首个结果回来前做极短过渡，首卡即切确定性。
+        self._stop_progress_flow()
+        self._set_progress(0)
+        # 骨架屏：点击瞬间即有 6 张占位呼吸，界面不再“冻住”
+        self._show_scan_skeleton()
         # 捕获当前可见规则集合，扫描过程中按过滤添加卡片
         self._visible_keys = {r.get("key") for r in self._visible_rules}
+        self._scan_queue = queue.Queue()
+        self._scan_gen += 1
         threading.Thread(target=self._scan_worker, daemon=True).start()
+        self._poll_scan_queue(self._scan_gen)
 
     def _scan_worker(self):
-        total = len(self.rules)
-        all_count = 0
-        all_size = 0
-        cancelled = False
-        for i, rule in enumerate(self.rules, 1):
-            # 窗口已关闭：停止调度，避免操作已销毁的控件（v2.5.3 修复）
-            if self._closing:
-                return
-            # v2.6：用户取消 → 保留已扫描的部分结果
-            if self._cancel_requested:
-                cancelled = True
-                break
-            # 实时反馈当前正在扫描的类别，进度更可感知
-            self.after(0, lambda n=rule["name"], v=i, t=total:
-                       self._set_status(f"正在扫描 ({v}/{t})：{n}", config.C_PRIMARY))
-            count, size, files = scan_rule(rule, cancel_check=self._cancel_event.is_set)
-            rule["_count"] = count
-            rule["_size"] = size
-            rule["_files"] = files
-            # 重置二级选择状态（v2.3.2）：None 表示未做细粒度选择，清理全部
-            rule["_selected_folders"] = None
-            rule["_selected_packages"] = None
-            all_count += count
-            all_size += size
-            if rule.get("key") in self._visible_keys:
-                self.after(0, lambda r=rule: self._add_row(r))
+        """后台线程：多核并行扫描，结果只进 queue（绝不碰 Tk）。"""
+        q = self._scan_queue
+
+        def _on_done(rule, _count, _size):
+            try:
+                q.put(("rule", rule))
+            except Exception:
+                pass
+
+        try:
+            all_count, all_size, cancelled = scan_rules_parallel(
+                self.rules, cancel_check=self._cancel_event.is_set,
+                on_rule_done=_on_done)
+        except Exception as e:
+            _logger.warning("并行扫描失败: %s", e)
+            all_count, all_size, cancelled = 0, 0, False
+        if self._closing:
+            return
         _logger.info("扫描结束: %d 个文件 / %s（取消=%s）",
                      all_count, fmt_size(all_size), cancelled)
-        self.after(0, lambda: self._finish_scan(all_count, all_size, cancelled))
+        try:
+            q.put(("done", all_count, all_size, cancelled))
+        except Exception:
+            pass
+
+    def _poll_scan_queue(self, gen):
+        """主线程轮询：把后台结果取出来刷新 UI（60ms 一轮，单次最多 40 条）。"""
+        try:
+            if self._closing or gen != self._scan_gen:
+                return
+            q = self._scan_queue
+            drained = 0
+            while drained < 40 and q is not None:
+                try:
+                    item = q.get_nowait()
+                except queue.Empty:
+                    break
+                drained += 1
+                if item[0] == "rule":
+                    self._on_rule_scanned(item[1])
+                elif item[0] == "done":
+                    _, all_count, all_size, cancelled = item
+                    self._finish_scan_drain(all_count, all_size, cancelled)
+                    return  # 收尾链接管，不再轮询
+            if self.scanning and gen == self._scan_gen:
+                try:
+                    self.after(60, lambda: self._poll_scan_queue(gen))
+                except Exception:
+                    pass
+        except Exception:
+            try:
+                if self.scanning and gen == self._scan_gen and not self._closing:
+                    self.after(120, lambda: self._poll_scan_queue(gen))
+            except Exception:
+                pass
+
+    def _on_rule_scanned(self, rule):
+        """主线程：单个规则扫描完成 → 进度推进 + 排队建卡。"""
+        try:
+            if self._closing:
+                return
+            self._scan_done += 1
+            total = max(1, self._scan_total)
+            # 确定性进度：留 5% 给收尾建卡，避免 100% 后还在建卡的割裂感
+            self._set_progress_determinate(
+                min(0.95, self._scan_done / total * 0.95))
+            self._set_status(
+                f"正在扫描 ({self._scan_done}/{self._scan_total})：{rule.get('name', '')}",
+                config.C_PRIMARY)
+            if rule.get("key") in self._visible_keys:
+                self._pending_cards.append(rule)
+                self._schedule_flush()
+        except Exception:
+            pass
+
+    def _schedule_flush(self):
+        """有待建卡且无待处理任务时，约一帧后批量建卡（合并高频完成回调）。"""
+        if self._flush_job is not None:
+            return
+        try:
+            self._flush_job = self.after(50, self._flush_pending_cards)
+        except Exception:
+            self._flush_pending_cards()
+
+    def _cancel_flush_job(self):
+        job = self._flush_job
+        self._flush_job = None
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+
+    def _flush_pending_cards(self):
+        """每帧最多建 6 张卡（约 <30ms 主线程占用），剩下的下一帧继续。
+
+        原实现每完成一条规则就 after 建一张卡 → 40+ 次 layout 抖动，
+        主线程被建卡淹没，滚动/进度动画全掉帧。现合并为批量帧，
+        每帧预算内完成，动画与滚动始终有时间片。
+        """
+        self._flush_job = None
+        try:
+            if self._closing or not self.winfo_exists():
+                self._pending_cards = []
+                return
+            if not self._pending_cards:
+                return
+            # 首批真实卡片到来即撤掉骨架屏（无缝衔接，无空白闪烁）
+            self._hide_scan_skeleton()
+            batch = self._pending_cards[:6]
+            del self._pending_cards[:6]
+            for rule in batch:
+                try:
+                    self._add_row(rule)
+                except Exception:
+                    pass
+            if self._pending_cards:
+                try:
+                    self._flush_job = self.after(50, self._flush_pending_cards)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _finish_scan_drain(self, all_count, all_size, cancelled):
+        """扫描线程已结束：等排队卡片建完再收尾，避免“100% 后还在蹦卡片”。"""
+        try:
+            if self._closing:
+                return
+            if self._pending_cards:
+                self._flush_pending_cards()
+                # 若还有剩余，下一轮继续等（复用同一 flush 节奏）
+                if self._pending_cards:
+                    self.after(80, lambda: self._finish_scan_drain(
+                        all_count, all_size, cancelled))
+                    return
+            self._finish_scan(all_count, all_size, cancelled)
+        except Exception:
+            try:
+                self._finish_scan(all_count, all_size, cancelled)
+            except Exception:
+                pass
+
+    # ---------- 骨架屏 ----------
+    def _show_scan_skeleton(self):
+        """在列表区首行铺骨架占位（grid 宿主 + 内部 pack，无 pack/grid 混用冲突）。"""
+        self._hide_scan_skeleton()
+        try:
+            host = ctk.CTkFrame(self.list_container, fg_color="transparent")
+            host.grid(row=0, column=0, columnspan=10, sticky="ew")
+            _cards, bars = make_skeleton_cards(host, count=6)
+            self._skeleton_host = host
+            self._skeleton_stop = start_skeleton_shimmer(self, bars)
+        except Exception:
+            self._skeleton_host = None
+            self._skeleton_stop = None
+
+    def _hide_scan_skeleton(self):
+        try:
+            stop = getattr(self, "_skeleton_stop", None)
+            if stop is not None:
+                try:
+                    stop()
+                except Exception:
+                    pass
+                self._skeleton_stop = None
+        except Exception:
+            pass
+        try:
+            host = getattr(self, "_skeleton_host", None)
+            if host is not None:
+                try:
+                    host.destroy()
+                except Exception:
+                    pass
+                self._skeleton_host = None
+        except Exception:
+            pass
+
+    def _set_progress_determinate(self, value):
+        """确定性进度设置（先停掉流动定时器，避免两者打架）。"""
+        try:
+            self._stop_progress_flow()
+        except Exception:
+            pass
+        self._set_progress(value)
 
     def _add_row(self, rule, selected=None):
         """构建单张清理项卡片。
@@ -1171,10 +1376,11 @@ class CleanerApp(ctk.CTk):
         cb.pack(side="left", padx=(0, T.SP.SM))
 
         # 图标胶囊：直接复用标签承载圆角底色（不再套一层 Frame）
+        # v4.3.0：底色加深（0.22→0.30），图标存在感更强
         icon_badge = ctk.CTkLabel(
             top_row, text="", width=34, height=34,
             corner_radius=T.R.SM,
-            fg_color=_mix_color(config.C_GLASS, accent_color, 0.22))
+            fg_color=_mix_color(config.C_GLASS, accent_color, 0.30))
         icon_badge.pack(side="left", padx=(0, T.SP.SM))
         icon_photo = rule_icon_photo(key, 30) if key else None
         if icon_photo is not None:
@@ -1189,7 +1395,7 @@ class CleanerApp(ctk.CTk):
             except Exception:
                 pass
 
-        # 真实应用图标异步加载（磁盘 I/O + ctypes 都在线程里）
+        # 真实应用图标异步加载（v4.2：共享 2 线程池，原来每张卡一个线程）
         if key:
             def _load_icon_async(k=key, badge=icon_badge):
                 try:
@@ -1211,10 +1417,16 @@ class CleanerApp(ctk.CTk):
                                                 config.C_GLASS, accent_color, 0.10))
                         except Exception:
                             pass
-                    self.after(0, _apply_icon)
+                    try:
+                        self.after(0, _apply_icon)
+                    except Exception:
+                        pass
                 except Exception:
                     pass
-            threading.Thread(target=_load_icon_async, daemon=True).start()
+            try:
+                self._icon_executor.submit(_load_icon_async)
+            except Exception:
+                pass
 
         name = ctk.CTkLabel(top_row, text=rule["name"],
                             font=fnt(T.FS.H3, "bold"),
@@ -1269,13 +1481,13 @@ class CleanerApp(ctk.CTk):
             image=ui_icon("file", 13), compound="left")
         cnt.pack(side="left", pady=BOTTOM_PAD)
 
-        # 风险项：⚠ 标识 + 悬停说明后果（需用户确认的项默认不勾选）
+        # 风险项：徽章化标识 + 悬停说明后果（需用户确认的项默认不勾选）。
+        # v4.3.0：由纯色文字改为语义徽章，与分类徽章体系统一，更精致。
         warn_text = rule.get("warn")
         warn_lbl = None
         if warn_text:
-            warn_lbl = ctk.CTkLabel(
-                card, text="⚠ 需确认", font=fnt(T.FS.MICRO, "bold"),
-                text_color=config.C_WARN, anchor="w")
+            warn_lbl = make_badge(card, "⚠ 需确认", config.C_WARN, height=19,
+                                  font_size=T.FS.MICRO, padx=8)
             warn_lbl.pack(side="left", padx=(T.SP.SM, 0), pady=BOTTOM_PAD)
             Tooltip(warn_lbl, warn_text)
 
@@ -1302,6 +1514,14 @@ class CleanerApp(ctk.CTk):
         self.row_widgets.append({"variable": var, "checkbox": cb, "rule": rule,
                                  "card": card, "desc_label": desc,
                                  "accent": accent_color})
+        # v4.2 入场呼吸描边：按建卡顺序错开 0/28/56ms…，波浪式浮现。
+        # 仅 2 次 canvas itemconfig，不走 configure 级联，单卡 <0.3ms。
+        try:
+            animate_card_entrance(
+                card, accent_color, selected=(var.get() == "on"),
+                delay=(idx % 8) * 28)
+        except Exception:
+            pass
         self._refresh_sel_buttons()
 
     def _refresh_card_state(self, card, cb, var, accent_color):
@@ -1454,12 +1674,33 @@ class CleanerApp(ctk.CTk):
     def _on_close(self):
         """主窗口关闭：先关闭详情对话框，再销毁窗口。"""
         self._closing = True
+        self._cancel_requested = True
+        try:
+            self._cancel_event.set()
+        except Exception:
+            pass
+        try:
+            self._cancel_flush_job()
+        except Exception:
+            pass
+        try:
+            self._hide_scan_skeleton()
+        except Exception:
+            pass
+        try:
+            set_anim_busy(False)
+        except Exception:
+            pass
         for dlg in list(self._open_dialogs.values()):
             try:
                 dlg._on_close()
             except Exception:
                 pass
         self._open_dialogs.clear()
+        try:
+            self._icon_executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
         cb = getattr(self, "_on_closed_callback", None)
         if cb is not None:
             try:
@@ -1468,12 +1709,37 @@ class CleanerApp(ctk.CTk):
                 pass
         self.destroy()
 
+    def _sort_cards_by_rule_order(self):
+        """按 rules 原始顺序重排卡片（v4.2.1：排序稳定化）。
+
+        并行扫描是谁先完成谁先建卡，顺序每次随机；收尾时按规则定义顺序
+        重排一次（复用 _relayout_cards 做 grid 重排），最终呈现永远一致。
+        扫描中仍渐进展示（快），结束时一次性归位（稳）。
+        """
+        try:
+            if not self.row_widgets:
+                return
+            order = getattr(self, "_rule_order", None) or {}
+            self.row_widgets.sort(
+                key=lambda it: order.get(id(it["rule"]), 10 ** 9))
+            self._relayout_cards()
+        except Exception:
+            pass
+
     def _finish_scan(self, all_count, all_size, cancelled=False):
         if self._closing:   # 窗口已关闭：不再操作控件（v2.5.3 修复）
             return
         self.scanning = False
+        self._cancel_flush_job()
+        self._hide_scan_skeleton()
+        try:
+            set_anim_busy(False)  # 恢复完整 hover 动效
+        except Exception:
+            pass
         self.has_scanned = True
         self._set_controls(True)
+        # v4.2.1：先按规则原始顺序重排卡片（取消/完成两条路径都稳定），再同步计数
+        self._sort_cards_by_rule_order()
         self._sync_sidebar_counts()
         if cancelled:
             # v2.6：取消时保留部分结果，进度条回零，不覆盖已有卡片
@@ -1494,7 +1760,7 @@ class CleanerApp(ctk.CTk):
         self.metric_label.configure(
             text=fmt_size(all_size), text_color=config.C_SUCCESS)
         if all_count == 0:
-            self._set_status("未发现可清理的垃圾文件，C 盘很干净 🙂", config.C_SUCCESS)
+            self._set_status("未发现可清理的垃圾文件，C 盘很干净", config.C_SUCCESS)
             self._toast("未发现可清理的垃圾文件", config.C_SUCCESS, icon="check")
         else:
             self._set_status(
@@ -1552,13 +1818,22 @@ class CleanerApp(ctk.CTk):
         self._cancel_requested = False   # v2.6：重置取消标志
         self._cancel_event.clear()
         self._set_controls(False)
+        try:
+            set_anim_busy(True)
+        except Exception:
+            pass
         self._set_status("正在清理…", config.C_WARN)
-        self._start_progress_flow()
+        self._stop_progress_flow()
+        self._set_progress(0)
+        self._clean_queue = queue.Queue()
+        self._clean_gen += 1
         threading.Thread(target=self._clean_worker,
                          args=(clean_plan, total_count), daemon=True).start()
+        self._poll_clean_queue(self._clean_gen)
 
     def _clean_worker(self, clean_plan, total_count):
         recycle = bool(self.cfg.get("recycle_mode"))   # v2.6
+        q = self._clean_queue
         freed = 0
         deleted = 0
         skipped = 0
@@ -1566,16 +1841,18 @@ class CleanerApp(ctk.CTk):
         total_rules = len(clean_plan)
         cancelled = False
         for ri, (rule, files) in enumerate(clean_plan, 1):
-            # 窗口已关闭：停止调度，避免操作已销毁的控件（v2.5.3 修复）
+            # 窗口已关闭：直接退出（v2.5.3 修复）
             if self._closing:
                 return
             # v2.6：用户取消 → 停止后续清理，保留已删除结果
             if self._cancel_requested:
                 cancelled = True
                 break
-            # 实时反馈当前正在清理的类别
-            self.after(0, lambda n=rule["name"], v=ri, t=total_rules:
-                       self._set_status(f"正在清理 ({v}/{t})：{n}", config.C_WARN))
+            # 进度只进 queue（v4.2 线程安全），主线程轮询刷新
+            try:
+                q.put(("progress", rule.get("name", ""), ri, total_rules))
+            except Exception:
+                pass
             f, d, s = clean_files(files, to_recycle=recycle,
                                   cancel_check=self._cancel_event.is_set)
             freed += f
@@ -1584,13 +1861,62 @@ class CleanerApp(ctk.CTk):
             done += len(files)
         _logger.info("清理结束: freed=%s deleted=%d skipped=%d cancelled=%s",
                      fmt_size(freed), deleted, skipped, cancelled)
-        self.after(0, lambda: self._finish_clean(freed, deleted, skipped,
-                                                 total_count, cancelled))
+        if self._closing:
+            return
+        try:
+            q.put(("done", freed, deleted, skipped, total_count, cancelled))
+        except Exception:
+            pass
+
+    def _poll_clean_queue(self, gen):
+        """主线程轮询清理进度（v4.2 线程安全）。"""
+        try:
+            if self._closing or gen != self._clean_gen:
+                return
+            q = self._clean_queue
+            drained = 0
+            while drained < 40 and q is not None:
+                try:
+                    item = q.get_nowait()
+                except queue.Empty:
+                    break
+                drained += 1
+                if item[0] == "progress":
+                    _, name, v, t = item
+                    self._on_clean_progress(name, v, t)
+                elif item[0] == "done":
+                    _, freed, deleted, skipped, total_count, cancelled = item
+                    self._finish_clean(freed, deleted, skipped,
+                                       total_count, cancelled)
+                    return
+            if self.cleaning and gen == self._clean_gen:
+                try:
+                    self.after(60, lambda: self._poll_clean_queue(gen))
+                except Exception:
+                    pass
+        except Exception:
+            try:
+                if self.cleaning and gen == self._clean_gen and not self._closing:
+                    self.after(120, lambda: self._poll_clean_queue(gen))
+            except Exception:
+                pass
+
+    def _on_clean_progress(self, name, v, t):
+        """主线程：清理进度回调（状态文本 + 确定性进度条，v4.2）。"""
+        try:
+            self._set_status(f"正在清理 ({v}/{t})：{name}", config.C_WARN)
+            self._set_progress_determinate(min(0.99, (v - 1) / max(1, t)))
+        except Exception:
+            pass
 
     def _finish_clean(self, freed, deleted, skipped, total_count, cancelled=False):
         if self._closing:   # 窗口已关闭：不再操作控件（v2.5.3 修复）
             return
         self.cleaning = False
+        try:
+            set_anim_busy(False)
+        except Exception:
+            pass
         self._set_controls(True)
         self._set_progress(1)
         if cancelled:
@@ -1617,6 +1943,12 @@ class CleanerApp(ctk.CTk):
         for b in (self.btn_scan, self.btn_clean, self.btn_all, self.btn_none,
                   self.btn_theme, self.btn_exit, self.btn_settings):
             b.configure(state=state)
+        # v4.3.0：忙时一并禁用搜索框。否则扫描中输入会触发 _apply_visible_rules，
+        # 把欢迎层盖到骨架屏/卡片上，扫完后列表还藏在欢迎层后面（必现 bug）。
+        try:
+            self.search_entry.configure(state=state)
+        except Exception:
+            pass
         # v2.6：取消按钮逻辑相反 —— 扫描/清理进行中可用，空闲时禁用
         try:
             self.btn_cancel.configure(state="normal" if not enabled else "disabled")

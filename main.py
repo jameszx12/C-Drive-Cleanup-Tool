@@ -17,11 +17,13 @@ import customtkinter as ctk  # 兼容：selftest 引用 M.ctk
 
 from config import *                      # noqa: F401,F403 颜色/常量/配置/日志
 from rules import build_rules, classify_junk_type, TYPE_COLORS  # noqa: F401
-from engine import (scan_rule, clean_files, filter_files_by_selection,  # noqa: F401
-                    open_in_explorer, _normcase, _parse_version)
+from engine import (scan_rule, scan_rules_parallel, clean_files, filter_files_by_selection,  # noqa: F401
+                    open_in_explorer, _normcase, _parse_version,
+                    SCAN_WORKERS, CLEAN_WORKERS)
 from particles import AnimatedBackground, _detect_refresh_rate, _bg_registry  # noqa: F401
 from widgets import (make_glass_card, bind_hover, fnt, mono_fnt,  # noqa: F401
-                     fmt_size, rule_visual, _set_hand_cursor)
+                      fmt_size, rule_visual, _set_hand_cursor,
+                      animate_card_entrance, set_anim_busy)
 from icons import get_app_icon, extract_app_icon_png  # noqa: F401
 from dialogs import FolderDetailDialog, PackageDetailDialog, SettingsDialog  # noqa: F401
 from app import CleanerApp  # noqa: F401

@@ -231,7 +231,7 @@ class _BaseDetailDialog(ctk.CTkToplevel):
         self.total_size_label.pack(side="right", padx=16, pady=12)
         self.close_btn = glass_btn(
             footer, "关闭", command=self._on_close,
-            accent=config.C_PRIMARY, kind="dlg", width=92)
+            accent=config.C_PRIMARY, kind="dlg", width=92, solid=True)
         self.close_btn.pack(side="right", padx=(6, 16), pady=11)
 
     # ===== 数据加载/过滤/渲染（子类重写） =====
@@ -451,9 +451,10 @@ class FolderDetailDialog(_BaseDetailDialog):
 
         for t in sorted(item.get("types", set())):
             color = TYPE_COLORS.get(t, config.C_TEXT_FAINT)
+            # v4.3.0：徽章底加深、白字，对比度拉满（原来淡底+彩字发灰难读）
             ctk.CTkLabel(
-                top, text=t, font=fnt(T.FS.MICRO, "bold"), text_color=color,
-                fg_color=_mix_color(config.C_GLASS, color, 0.35),
+                top, text=t, font=fnt(T.FS.MICRO, "bold"), text_color="#ffffff",
+                fg_color=_mix_color(config.C_GLASS, color, 0.55),
                 corner_radius=10, padx=9, pady=1, height=20
             ).pack(side="left", padx=(0, 6))
 
@@ -639,10 +640,11 @@ class PackageDetailDialog(_BaseDetailDialog):
             ctk.CTkLabel(row, text=pkg["name"], font=fnt(T.FS.BODY_S),
                          text_color=config.C_TEXT, anchor="w").pack(side="left", padx=(0, 8))
             ver_color = config.C_PRIMARY if pkg["version"] != "—" else config.C_TEXT_FAINT
+            # v4.3.0：与文件夹类型徽章统一，白字+加深底
             ctk.CTkLabel(
                 row, text=f"v {pkg['version']}", font=fnt(T.FS.MICRO, "bold"),
-                text_color=ver_color,
-                fg_color=_mix_color(config.C_GLASS, ver_color, 0.35),
+                text_color="#ffffff",
+                fg_color=_mix_color(config.C_GLASS, ver_color, 0.55),
                 corner_radius=8, padx=8, pady=0, height=18
             ).pack(side="left", padx=(0, 8))
             ctk.CTkLabel(row, text=pkg["ext"].lstrip(".").upper(),
@@ -809,7 +811,8 @@ class SettingsDialog(ctk.CTkToplevel):
         footer = ctk.CTkFrame(self.content, fg_color="transparent")
         footer.pack(fill="x", padx=T.SP.LG, pady=(T.SP.SM, T.SP.LG))
         glass_btn(footer, "保存", command=self._save,
-                  accent=config.C_PRIMARY, kind="dlg", width=100).pack(
+                  accent=config.C_PRIMARY, kind="dlg", width=100,
+                  solid=True).pack(
             side="right")
         glass_btn(footer, "取消", command=self._close,
                   accent=config.C_GLASS_3, kind="dlg", width=92).pack(

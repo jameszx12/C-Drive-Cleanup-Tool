@@ -181,10 +181,13 @@ def style_popup(top):
 
 
 class Tooltip:
-    """延迟悬浮提示气泡（描边式，非玻璃卡片，层级更轻）。"""
+    """延迟悬浮提示气泡（描边式，非玻璃卡片，层级更轻）。
+
+    v4.3.0：移除 _registry（只写不读，且强引用已销毁控件导致跨扫描/
+    跨主题切换的内存泄漏）。Tooltip 生命周期跟随宿主控件即可。
+    """
 
     DELAY = 420
-    _registry = {}
 
     def __init__(self, widget, text, **kw):
         self.widget = widget
@@ -197,10 +200,6 @@ class Tooltip:
                 widget.bind(ev, fn, add="+")
             except Exception:
                 pass
-        try:
-            self._registry[str(widget)] = self
-        except Exception:
-            pass
 
     def _schedule(self, _e=None):
         self._cancel()
@@ -366,6 +365,169 @@ def make_glass_card(parent, *, fg=None, border=None, radius=T.R.LG,
                      border=border, border_width=border_width)
 
 
+# =================================================================== 动效总开关
+# v4.2：忙时降级 —— 扫描/清理/批量建卡期间，主线程每一毫秒都很宝贵，
+# hover 的 4 帧插值动画与卡片描边重绘会跟滚动/建卡抢主线程。
+# App 在忙时调用 set_anim_busy(True)，hover/按钮动画降级为“瞬时变色”
+# （1 次 itemconfig，无 after 链），视觉差异几乎不可察，但能省掉
+# 大量主线程调度；空闲时自动恢复完整动效。
+_ANIM_BUSY = False
+
+
+def set_anim_busy(busy):
+    """设置全局动效忙碌标志（扫描/清理中 True，结束 False）。"""
+    global _ANIM_BUSY
+    _ANIM_BUSY = bool(busy)
+
+
+def is_anim_busy():
+    return _ANIM_BUSY
+
+
+def animate_card_entrance(card, accent=None, selected=True, delay=0):
+    """卡片入场“呼吸描边”（v4.2 新增，廉价感知动画）。
+
+    原理：只改 canvas 上已有的 card_border 图元 outline（单次 <0.1ms），
+    全程 2 次 itemconfig + 最多 2 次 after 调度，不触发 CTk configure 级联、
+    不重建任何控件。delay 按建卡顺序错开（0/30/60ms…），形成波浪式浮现，
+    人眼会觉得“丝滑”，但主线程总开销icker每张卡 <0.3ms。
+
+    参数：
+      accent   强调色（None 则用当前主题 PRIMARY）
+      selected 卡片最终选中态（决定结束时的描边颜色，与 _refresh_card_state 一致）
+      delay    入场延迟 ms（调用方按 idx 错开，实现 stagger）
+    """
+    try:
+        accent = accent or config.C_PRIMARY
+        border = config.C_GLASS_BORDER
+        flash = _mix_color(border, accent, 0.80)
+        final = (_mix_color(border, accent, 0.45) if selected else border)
+
+        def _set(color):
+            try:
+                if not card.winfo_exists():
+                    return False
+                card._canvas.itemconfig("card_border", outline=color)
+                return True
+            except Exception:
+                return False
+
+        def _final():
+            # shell 可能还没画（draw 在 make_card 后 50ms），tag 不存在则稍后重试一次
+            if not _set(final):
+                try:
+                    card.after(80, lambda: _set(final))
+                except Exception:
+                    pass
+
+        def _start():
+            try:
+                if not card.winfo_exists():
+                    return
+            except Exception:
+                return
+            _set(flash)
+            try:
+                card.after(70, _final)
+            except Exception:
+                _final()
+
+        if delay and delay > 0:
+            try:
+                card.after(int(delay), _start)
+            except Exception:
+                _start()
+        else:
+            _start()
+    except Exception:
+        pass
+
+
+def make_skeleton_cards(parent, count=6):
+    """骨架占位卡（v4.2 新增）：扫描时先秒出占位，避免“点击后界面冻住”的感觉。
+
+    每张仅 4 个纯色条（无绑定、无 hover、无 shell 重绘），6 张共 ~24 个控件，
+    建卡 <10ms；配合 start_skeleton_shimmer 的单一定时器呼吸脉冲，
+    用户感知为“正在加载”而非“卡死”。返回 (cards, bars) 供启停/销毁。
+    """
+    cards = []
+    bars = []
+    try:
+        for _ in range(count):
+            card = ctk.CTkFrame(parent, fg_color=config.C_GLASS,
+                                corner_radius=T.R.LG, height=110,
+                                border_width=0)
+            card.pack(fill="x", padx=6, pady=5)
+            card.pack_propagate(False)
+            # 标题条 + 两行文本条 + 底部徽章条（纯色块，无交互）
+            t = ctk.CTkFrame(card, fg_color=config.C_GLASS_3,
+                             corner_radius=6, height=16)
+            t.pack(fill="x", padx=14, pady=(14, 0))
+            t.pack_propagate(False)
+            bars.append(t)
+            for w in (180, 120):
+                b = ctk.CTkFrame(card, fg_color=config.C_GLASS_3,
+                                 corner_radius=6, height=11, width=w)
+                b.pack(anchor="w", padx=14, pady=(8, 0))
+                b.pack_propagate(False)
+                bars.append(b)
+            f = ctk.CTkFrame(card, fg_color=config.C_GLASS_3,
+                             corner_radius=8, height=18, width=90)
+            f.pack(anchor="w", padx=14, pady=(10, 0))
+            f.pack_propagate(False)
+            bars.append(f)
+            cards.append(card)
+    except Exception:
+        pass
+    return cards, bars
+
+
+def start_skeleton_shimmer(widget, bars, interval=380):
+    """启动骨架呼吸（单一定时器驱动全部条带，v4.2）。
+
+    每 interval ms 在 base/pulse 两色间切换一次（1 次 tick 改 N 个图元，
+    用 _fast_recolor 走 canvas 直改，不走 configure 级联）。
+    返回 stop() 可调用对象；widget 销毁后自动停止。
+    """
+    state = {"on": False, "job": None}
+
+    def _tick():
+        state["job"] = None
+        try:
+            if not widget.winfo_exists():
+                return
+        except Exception:
+            return
+        state["on"] = not state["on"]
+        target = (config.C_GLASS_HOV if state["on"] else config.C_GLASS_3)
+        for b in list(bars):
+            try:
+                if b.winfo_exists():
+                    _fast_recolor(b, target)
+            except Exception:
+                pass
+        try:
+            state["job"] = widget.after(interval, _tick)
+        except Exception:
+            state["job"] = None
+
+    try:
+        state["job"] = widget.after(interval, _tick)
+    except Exception:
+        pass
+
+    def stop():
+        job = state.get("job")
+        if job is not None:
+            try:
+                widget.after_cancel(job)
+            except Exception:
+                pass
+            state["job"] = None
+
+    return stop
+
+
 def bind_hover(widget, base=None, hover=None, *, frames=None, delay=None):
     """悬停平滑变色（走 configure 级联，保证子控件背景跟随）。
 
@@ -390,6 +552,17 @@ def bind_hover(widget, base=None, hover=None, *, frames=None, delay=None):
             pass
 
     def _run(target):
+        # v4.2 忙时降级：批量建卡/扫描期间 hover 直接瞬时变色，不排 after 链
+        if _ANIM_BUSY:
+            if st["job"] is not None:
+                try:
+                    widget.after_cancel(st["job"])
+                except Exception:
+                    pass
+                st["job"] = None
+            st["t"] = target
+            _apply(target)
+            return
         if st["job"] is not None:
             try:
                 widget.after_cancel(st["job"])
@@ -466,6 +639,9 @@ class GlassButton(ctk.CTkButton):
       - 顶部高光减弱到 5%，仅作材质暗示。
       - 去掉键盘焦点环（点击后蓝圈常驻显杂乱），仅保留悬停变色反馈。
       - 禁用态自动降饱和。
+      - v4.3.0 solid 模式：主操作按钮用近实心强调色 + 自动文字色
+        （蓝底白字 / 琥珀底深字），一改原来 30% 混合在深色底上发灰、
+        琥珀混成"橄榄泥"的廉价感。
     """
 
     ANIM_STEPS = T.AN.HOVER_FRAMES
@@ -476,16 +652,19 @@ class GlassButton(ctk.CTkButton):
     HL_INSET   = 8
 
     def __init__(self, master, text="", command=None, accent=None,
-                 parent_bg=None, **kw):
+                 parent_bg=None, solid=False, **kw):
         self._accent = accent or config.C_PRIMARY
         self._parent_bg = config.C_GLASS_2 if parent_bg is None else parent_bg
+        self._solid = bool(solid)
         self._base_fg, self._hover_fg, self._disabled_fg = self._compute_fg(self._accent)
         self._t = 0.0
         self._shine_job = None
         kw.setdefault("font", fnt(T.FS.BODY, "bold"))
         kw.setdefault("fg_color", self._base_fg)
         kw.setdefault("hover_color", self._base_fg)   # 动画接管
-        kw.setdefault("text_color", config.C_TEXT)
+        if "text_color" not in kw:
+            kw["text_color"] = (self._solid_text_color() if self._solid
+                                else config.C_TEXT)
         kw.setdefault("border_width", 0)
         kw.setdefault("corner_radius", T.R.MD)
         super().__init__(master, text=text, command=command, **kw)
@@ -504,8 +683,23 @@ class GlassButton(ctk.CTkButton):
         self.bind("<FocusOut>", self._on_blur, add="+")
 
     # ---------- 视觉 ----------
+    def _solid_text_color(self):
+        """实心按钮文字色：亮底（琥珀/薄荷）配深字，暗底（蓝/红）配白字。"""
+        try:
+            return "#23272f" if _luma(self._accent) > 150 else "#ffffff"
+        except Exception:
+            return "#ffffff"
+
     def _compute_fg(self, accent):
-        """按面板深浅配色：深底混强调色提亮，浅底混强调色做淡彩底。"""
+        """按面板深浅配色：深底混强调色提亮，浅底混强调色做淡彩底。
+
+        solid 模式直接用强调色本体（深浅主题通用），悬停向白提亮 14%。
+        """
+        if getattr(self, "_solid", False):
+            base = accent
+            hover = _mix_color(accent, "#ffffff", 0.14)
+            dis = _mix_color(self._parent_bg, "#000000", 0.25)
+            return base, hover, dis
         dark = _is_dark(self._parent_bg)
         if dark:
             base = _mix_color(self._parent_bg, accent, self.TINT)
@@ -589,6 +783,11 @@ class GlassButton(ctk.CTkButton):
             except Exception:
                 pass
             self._shine_job = None
+        # v4.2 忙时降级：直接跳到目标态，不排 after 链
+        if _ANIM_BUSY:
+            self._t = target
+            self._apply_look(target)
+            return
         step = (target - self._t) / self.ANIM_STEPS
 
         def tick():
@@ -635,10 +834,11 @@ _BTN_SPEC = {
 
 def glass_btn(master, text, command=None, *, accent=None, kind="md",
               width=None, height=None, parent_bg=None, state=None,
-              icon=None, icon_size=18, **kw):
+              icon=None, icon_size=18, solid=False, **kw):
     """统一按钮工厂。
 
     kind: lg 主操作 / md 工具栏次级 / dlg 对话框 / sm 卡片内 / icon 图标按钮
+    solid: True 则用近实心强调色（主操作专用，对比度拉满）
     """
     spec = dict(_BTN_SPEC.get(kind, _BTN_SPEC["md"]))
     spec["font"] = fnt(spec.pop("size"), "bold")
@@ -659,7 +859,7 @@ def glass_btn(master, text, command=None, *, accent=None, kind="md",
             kwargs["compound"] = "left"
     kwargs.update(kw)
     btn = GlassButton(master, text=text, command=command, accent=accent,
-                      parent_bg=parent_bg, **kwargs)
+                      parent_bg=parent_bg, solid=solid, **kwargs)
     if state:
         btn.configure(state=state)
     return btn
@@ -686,7 +886,7 @@ class StatCard(ctk.CTkFrame):
 
         cap = ctk.CTkLabel(
             row, text="", width=30, height=30, corner_radius=T.R.SM,
-            fg_color=_mix_color(config.C_GLASS_3, self.color, 0.20))
+            fg_color=_mix_color(config.C_GLASS_3, self.color, 0.32))
         cap.pack(side="left", padx=(0, 9))
         img = ui_icon(icon, 18)
         if img is not None:
