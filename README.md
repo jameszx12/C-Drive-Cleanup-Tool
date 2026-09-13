@@ -1,10 +1,10 @@
 # C-Drive-Cleanup-Tool(C盘清理工具)
 
-**版本 v4.3.0** | 作者 zx
+**版本 v4.3.1** | 作者 zx
 
 一个安全、高效的 Windows C 盘垃圾清理工具，配备现代化扁平设计与玻璃质感 UI、分类导航与智能扫描引擎，帮你快速释放磁盘空间。
 
-![version](https://img.shields.io/badge/version-v4.3.0-blue)
+![version](https://img.shields.io/badge/version-v4.3.1-blue)
 ![platform](https://img.shields.io/badge/platform-Windows-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
@@ -73,7 +73,7 @@
 ## 🚀 快速开始
 
 ### 运行已打包版本（推荐）
-从 [Releases](../../releases) 下载 `C-Drive-Cleanup-Tool-v4.3.0.exe`（即 C盘清理工具 v4.3.0），双击运行。程序会请求管理员权限（因为需要清理系统目录），请点击「是」。首次运行若被 Windows SmartScreen 拦截，选择「仍要运行」即可（本工具无任何恶意行为）。
+从 [Releases](../../releases) 下载 `C-Drive-Cleanup-Tool-v4.3.1.exe`（即 C盘清理工具 v4.3.1），双击运行。程序会请求管理员权限（因为需要清理系统目录），请点击「是」。首次运行若被 Windows SmartScreen 拦截，选择「仍要运行」即可（本工具无任何恶意行为）。
 
 ### 报毒说明（误报）
 部分杀软/浏览器可能把 exe 标记为病毒或阻止下载，这是**误报**，原因：

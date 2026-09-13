@@ -1,12 +1,12 @@
 ﻿# UTF-8
-# Version resource for C盘清理工具 (C Drive Cleanup Tool) v4.3.0.
+# Version resource for C盘清理工具 (C Drive Cleanup Tool) v4.3.1.
 # Referenced by build.bat:  --version-file "version_info.txt"
 # Real company/product metadata reduces AV heuristic false positives
 # (an exe with zero metadata looks more suspicious to ML scanners).
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(4, 3, 0, 0),
-    prodvers=(4, 3, 0, 0),
+    filevers=(4, 3, 1, 0),
+    prodvers=(4, 3, 1, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -21,12 +21,12 @@ VSVersionInfo(
           '040904B0',
            [StringStruct('CompanyName', 'zx'),
             StringStruct('FileDescription', 'C Drive Cleanup Tool'),
-            StringStruct('FileVersion', '4.3.0'),
+            StringStruct('FileVersion', '4.3.1'),
             StringStruct('InternalName', 'C-Drive-Cleanup-Tool'),
             StringStruct('LegalCopyright', 'Copyright (c) 2026 zx, MIT License'),
-            StringStruct('OriginalFilename', 'C-Drive-Cleanup-Tool-v4.3.0.exe'),
+            StringStruct('OriginalFilename', 'C-Drive-Cleanup-Tool-v4.3.1.exe'),
             StringStruct('ProductName', 'C Drive Cleanup Tool'),
-            StringStruct('ProductVersion', '4.3.0')])
+            StringStruct('ProductVersion', '4.3.1')])
       ]
     ),
     VarFileInfo([VarStruct('Translation', [1033, 1200])])

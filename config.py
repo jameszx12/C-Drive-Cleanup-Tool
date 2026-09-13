@@ -12,7 +12,7 @@ import theme as _theme
 
 APP_NAME = "C盘垃圾清理工具"
 AUTHOR = "zx"
-VERSION = "v4.3.0"
+VERSION = "v4.3.1"
 
 FONT_FAMILY = "Microsoft YaHei UI"   # Windows 系统内置中文字体，清晰锐利
 MONO_FAMILY = "Consolas"              # 等宽字体，用于路径显示

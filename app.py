@@ -33,7 +33,7 @@ from widgets import (make_glass_card, make_card, draw_card_shell, bind_hover,
                      make_badge, Tooltip, NavItem, StatCard, SegmentedControl,
                      SectionTitle, EmptyState, ProgressBar, Toggle, Dropdown,
                      style_popup, animate_card_entrance, make_skeleton_cards,
-                     start_skeleton_shimmer, set_anim_busy)
+                     start_skeleton_shimmer, set_anim_busy, CARD_H)
 from engine import (scan_rule, scan_rules_parallel, clean_files,
                     filter_files_by_selection, open_in_explorer)
 from rules import build_rules
@@ -57,6 +57,11 @@ CAT_META = {
 
 # SidebarItem：v4.0 起由 widgets.NavItem 实现，此处保留旧名以兼容历史引用。
 SidebarItem = NavItem
+
+# 卡片网格间距：_add_row 与 _relayout_cards 必须共用同一值，
+# 否则扫描建卡（4,4）与排序/改列数重排（6,5）后间隙会跳动。
+CARD_GAP_X = 6
+CARD_GAP_Y = 5
 
 
 class CleanerApp(ctk.CTk):
@@ -124,10 +129,10 @@ class CleanerApp(ctk.CTk):
         self._build_shell()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.bind("<Return>", self._on_return)
-        self.bind("<Control-a>", lambda _e: self._set_all(True))
-        self.bind("<Control-A>", lambda _e: self._set_all(True))
-        self.bind("<Control-Shift-a>", lambda _e: self._set_all(False))
-        self.bind("<Control-Shift-A>", lambda _e: self._set_all(False))
+        self.bind("<Control-a>", self._on_select_all)
+        self.bind("<Control-A>", self._on_select_all)
+        self.bind("<Control-Shift-a>", self._on_select_none)
+        self.bind("<Control-Shift-A>", self._on_select_none)
         self.bind("<F5>", lambda _e: self.start_scan())
         self.report_callback_exception = self._on_callback_exception
 
@@ -138,18 +143,53 @@ class CleanerApp(ctk.CTk):
             return  # 已销毁控件的迟发回调，安全忽略
         traceback.print_exception(exc_type, exc_value, exc_tb)
 
+    def _focus_entry(self):
+        """焦点所在的文本输入框（搜索框等）；不在输入框内返回 None。
+
+        全局快捷键必须先问这一句：Tk 会把键盘事件按 bindtags 依次交给
+        输入框和窗口级绑定，窗口级不判断就会「在搜索框里按 Ctrl+A 变成
+        全选清理项」。
+        """
+        try:
+            fw = self.focus_get()
+        except Exception:
+            return None
+        return fw if isinstance(fw, (ctk.CTkEntry, tk.Entry)) else None
+
     def _on_return(self, _e=None):
         """全局回车 = 开始扫描，但焦点在输入框时除外。
 
         否则在侧栏搜索框里敲回车也会触发扫描（用户本意只是确认搜索）。
         """
-        try:
-            fw = self.focus_get()
-            if isinstance(fw, (ctk.CTkEntry, tk.Entry)):
-                return
-        except Exception:
-            pass
+        if self._focus_entry() is not None:
+            return
         self.start_scan()
+
+    def _on_select_all(self, _e=None):
+        """Ctrl+A：焦点在搜索框时全选框内文本，否则全选清理项。
+
+        Windows 上 Tk 未给 Entry 绑定 Ctrl+A，这里补上文本全选，
+        避免「按了没反应、清理项却被全部勾上」。
+        """
+        entry = self._focus_entry()
+        if entry is not None:
+            try:
+                entry.select_range(0, "end")
+                entry.icursor("end")
+            except Exception:
+                pass
+            return "break"
+        if self.cleaning:
+            return
+        self._set_all(True)
+
+    def _on_select_none(self, _e=None):
+        """Ctrl+Shift+A：全不选（输入框内不响应）。"""
+        if self._focus_entry() is not None:
+            return "break"
+        if self.cleaning:
+            return
+        self._set_all(False)
 
     # ---------- 窗口几何 ----------
     def _init_window_geometry(self):
@@ -249,6 +289,7 @@ class CleanerApp(ctk.CTk):
         self._cols = 2
         self._max_cols_cfg = 2
         self._col_width = 480
+        self._last_wrap = None
         self._build_shell()
         self._sync_sidebar_counts()
         if self.has_scanned:
@@ -439,7 +480,14 @@ class CleanerApp(ctk.CTk):
             pass
 
     def _select_cat(self, cat):
+        """切换分类过滤。
+
+        扫描/清理中拒绝：期间重建列表会丢掉已建卡片、且后续结果仍按旧
+        过滤集合添加，最终列表不完整。此处给出提示而非静默无响应。
+        """
         if self.scanning or self.cleaning:
+            self._toast("扫描 / 清理进行中，暂不能切换分类",
+                        config.C_WARN, icon="cancel", duration=1800)
             return
         if cat == self._current_cat:
             return
@@ -483,6 +531,11 @@ class CleanerApp(ctk.CTk):
         bar = make_card(parent, fg=config.C_GLASS_2, height=T.H.TOOLBAR)
         bar.pack(fill="x", pady=(0, T.SP.SM))
         bar.pack_propagate(False)
+        # 重建（主题切换）时复位：新控件必须重新走一次降级判断。
+        # _toolbar_w 也要清 —— 否则同尺寸窗口下首个 Configure 会被判为
+        # “宽度未变”而跳过，统计卡保持默认铺开，窄窗口下溢出。
+        self._toolbar_stats_mode = None
+        self._toolbar_w = None
 
         inner = ctk.CTkFrame(bar, fg_color="transparent")
         inner.pack(fill="both", expand=True, padx=T.SP.MD, pady=T.SP.MD)
@@ -509,8 +562,8 @@ class CleanerApp(ctk.CTk):
         self.btn_cancel.pack(side="left")
 
         # ---- 分隔线 ----
-        ctk.CTkFrame(inner, fg_color=config.C_LINE_2, width=1).pack(
-            side="left", fill="y", padx=T.SP.LG, pady=2)
+        self.toolbar_sep = ctk.CTkFrame(inner, fg_color=config.C_LINE_2, width=1)
+        self.toolbar_sep.pack(side="left", fill="y", padx=T.SP.LG, pady=2)
 
         # ---- 编辑组 ----
         edit = ctk.CTkFrame(inner, fg_color="transparent")
@@ -527,17 +580,61 @@ class CleanerApp(ctk.CTk):
         self.btn_none.pack(side="left")
 
         # ---- 右侧指标卡 ----
-        stats = ctk.CTkFrame(inner, fg_color="transparent")
-        stats.pack(side="right")
-        self.card_count = StatCard(stats, "file", "已发现文件",
+        # 指标卡按可用宽度自适应（宽→两张 / 中→一张 / 窄→隐藏）：
+        # 空间不足时 pack 会把统计卡压扁甚至挤出边界（文字重叠、被裁切），
+        # 表现为"改变窗口宽度后工具栏排布乱"，故按剩余宽度显式降级。
+        self.toolbar_inner = inner
+        self.toolbar_core = core
+        self.toolbar_edit = edit
+        self.toolbar_stats = ctk.CTkFrame(inner, fg_color="transparent")
+        self.toolbar_stats.pack(side="right")
+        self.card_count = StatCard(self.toolbar_stats, "file", "已发现文件",
                                    color=config.C_PRIMARY, width=152)
         self.card_count.pack(side="left", padx=(0, T.SP.SM))
-        self.card_space = StatCard(stats, "drive", "预计可释放",
+        self.card_space = StatCard(self.toolbar_stats, "drive", "预计可释放",
                                    color=config.C_SUCCESS, width=152)
         self.card_space.pack(side="left")
         # 兼容旧引用（对话框与主题切换里更新这两个标签）
         self.summary_label = self.card_count.value
         self.metric_label = self.card_space.value
+        inner.bind("<Configure>", self._on_toolbar_configure, add="+")
+
+    def _on_toolbar_configure(self, event):
+        """工具栏响应式：按剩余宽度决定显示几张指标卡（防挤压/裁切）。
+
+        注意 CTkFrame 的 bind 会转发到内部 canvas，event.widget 是 canvas
+        而非 toolbar_inner 本身，故此处只按宽度判断（并防重复计算）。
+        """
+        try:
+            avail = event.width
+            if avail == getattr(self, "_toolbar_w", None):
+                return
+            self._toolbar_w = avail
+            need = (self.toolbar_core.winfo_reqwidth()
+                    + self.toolbar_sep.winfo_reqwidth()
+                    + self.toolbar_edit.winfo_reqwidth())
+            gap = T.SP.LG * 2 + T.SP.SM          # 分隔线两侧留白 + 与指标卡间距
+            factor = self._scaling_factor()
+            one = int(152 * factor)
+            room = avail - need - int(gap * factor)
+            if room >= one * 2 + int(T.SP.SM * factor):
+                want = "both"
+            elif room >= one:
+                want = "one"
+            else:
+                want = "none"
+            if want == getattr(self, "_toolbar_stats_mode", None):
+                return
+            self._toolbar_stats_mode = want
+            self.card_count.pack_forget()
+            self.card_space.pack_forget()
+            if want == "both":
+                self.card_count.pack(side="left", padx=(0, T.SP.SM))
+                self.card_space.pack(side="left")
+            elif want == "one":
+                self.card_count.pack(side="left")
+        except Exception:
+            pass
 
     # ---------- 列表区 ----------
     def _build_list_area(self, parent):
@@ -711,23 +808,55 @@ class CleanerApp(ctk.CTk):
                 pass
 
     def _on_list_configure(self, event):
-        """容器尺寸变化时，根据宽度重新计算列数并重排卡片。"""
-        if not self.has_scanned:
-            return
-        width = max(200, event.width)
+        """容器尺寸变化时，根据宽度重新计算列数并重排卡片。
+
+        注意不能按 has_scanned 早退：欢迎页/扫描期间也要跟随宽度更新
+        _cols，否则首扫建卡用旧列数、扫描中拉宽窗口不重排（布局乱）。
+        row_widgets 为空时重排是空操作，开销可忽略。
+        """
+        self._sync_cols(event.width)
+        self._update_desc_wraplength()
+
+    def _sync_cols(self, width):
+        """按容器宽度（物理像素）重算列数；列数变化时重排已建卡片。
+
+        两道前置判断，都是为了让「窗口宽度 → 列数」只按真实可视宽度决定：
+          - 窗口尚未映射（启动阶段）：容器宽度是布局中间态（实测 250/528），
+            按它算会把列数锁死成 1~2，映射后首次扫描就用错列数。
+          - 宽度退化（< 单列卡片所需）：欢迎页把滚动区移出布局时会出现，
+            出现即为未完成布局，不是真实尺寸。
+        """
+        try:
+            if not self.winfo_ismapped():
+                return
+        except Exception:
+            pass
         factor = self._scaling_factor()
+        if width < 300 * factor:
+            return
         new_cols = max(1, min(4, int(width // (330 * factor))))
         self._col_width = max(160, (width / new_cols) / factor)
         if new_cols != self._cols:
             self._cols = new_cols
             self._configure_columns(new_cols)
-            self._relayout_cards()
-        else:
-            self._update_desc_wraplength()
+            if self.row_widgets:
+                self._relayout_cards()
+
+    def _desc_wraplength(self):
+        """描述文本换行宽度（逻辑单位）。
+
+        量化到 24px 步进：拖拽改宽时避免逐像素重排导致的文本抖动。
+        向下取整但不下穿 180（描述文本的最小可读宽度）。
+        """
+        base = max(180, int(self._col_width) - 56)
+        return max(180, base - (base % 24))
 
     def _update_desc_wraplength(self):
-        """按当前列宽更新所有卡片描述/文本的换行宽度。"""
-        wrap = max(180, self._col_width - 56)
+        """按当前列宽更新所有卡片描述/文本的换行宽度（值变化才重配）。"""
+        wrap = self._desc_wraplength()
+        if wrap == getattr(self, "_last_wrap", None):
+            return
+        self._last_wrap = wrap
         for item in self.row_widgets:
             desc = item.get("desc_label")
             if desc is not None:
@@ -737,13 +866,18 @@ class CleanerApp(ctk.CTk):
                     pass
 
     def _configure_columns(self, cols):
-        """设置前 cols 列等宽；多余列 weight=0 不占空间。"""
+        """设置前 cols 列等宽；多余列 weight=0 且**必须清除 uniform**。
+
+        uniform 只置空 weight 不够：残留的 uniform 组会让空列继续参与
+        等宽分配，实测缩列后空列仍抢走整列宽度，可见卡片被挤窄、
+        右侧留一大块空白（宽度变化后排布乱的主因）。
+        """
         max_cfg = max(self._max_cols_cfg, cols)
         for c in range(max_cfg):
             if c < cols:
                 self.list_container.columnconfigure(c, weight=1, uniform="col")
             else:
-                self.list_container.columnconfigure(c, weight=0)
+                self.list_container.columnconfigure(c, weight=0, uniform="")
         self._max_cols_cfg = max_cfg
 
     def _relayout_cards(self):
@@ -756,7 +890,7 @@ class CleanerApp(ctk.CTk):
             except Exception:
                 pass
             card.grid(row=idx // cols, column=idx % cols,
-                      sticky="ew", padx=6, pady=5)
+                      sticky="ew", padx=CARD_GAP_X, pady=CARD_GAP_Y)
         self._update_desc_wraplength()
 
     # ---------- 空状态 ----------
@@ -1041,6 +1175,9 @@ class CleanerApp(ctk.CTk):
 
     # ---------- 选择逻辑 ----------
     def _set_all(self, checked):
+        """全选 / 全不选（清理进行中忽略：计划已固定，改动只会让界面与实际不符）。"""
+        if self.cleaning:
+            return
         # 注意：checkbox.select/deselect 只改 variable 与自身绘制，
         # 不触发 command 回调 —— 必须手动同步卡片描边与 _sel_state，
         # 否则全选后卡片边框不变、切换分类后勾选状态恢复错误。
@@ -1051,7 +1188,8 @@ class CleanerApp(ctk.CTk):
                 item["checkbox"].deselect()
             try:
                 self._refresh_card_state(item["card"], item["checkbox"],
-                                         item["variable"], item["accent"])
+                                         item["variable"], item["accent"],
+                                         item["rule"])
             except Exception:
                 pass
         self._refresh_sel_buttons()
@@ -1075,8 +1213,8 @@ class CleanerApp(ctk.CTk):
         try:
             items = self.row_widgets
             if not items:
-                self.btn_all.configure(text="全选", image=ui_icon("sel_all_off", 20))
-                self.btn_none.configure(text="全不选", image=ui_icon("sel_none_off", 20))
+                self.btn_all.configure(text="全选", image=ui_icon("sel_all_off", 17))
+                self.btn_none.configure(text="全不选", image=ui_icon("sel_none_off", 17))
                 self.sel_label.configure(text="")
                 return
             on = 0
@@ -1354,10 +1492,13 @@ class CleanerApp(ctk.CTk):
         accent_color, category = rule_visual(rule)
 
         card = make_card(self.list_container, fg=config.C_GLASS,
-                         radius=T.R.LG, height=156)
+                         radius=T.R.LG, height=CARD_H)
         card.grid(row=idx // cols, column=idx % cols, sticky="ew",
-                  padx=T.SP.XS, pady=T.SP.XS)
-        card.grid_propagate(False)
+                  padx=CARD_GAP_X, pady=CARD_GAP_Y)
+        # 卡片子控件是 pack 布局，必须用 pack_propagate 固定尺寸：
+        # grid_propagate 对 pack 子控件无效，卡片高度会随描述换行数
+        # 漂移，同一行卡片高矮不一（宽度变化后排布乱的原因之一）。
+        card.pack_propagate(False)
         bind_hover(card, config.C_GLASS, config.C_GLASS_HOV)
 
         PAD = T.SP.MD   # 卡片统一内边距
@@ -1442,7 +1583,7 @@ class CleanerApp(ctk.CTk):
         desc = ctk.CTkLabel(
             card, text=rule["desc"], font=fnt(T.FS.CAPTION),
             text_color=config.C_TEXT_3, anchor="w", justify="left",
-            wraplength=max(180, self._col_width - 56))
+            wraplength=self._desc_wraplength())
         desc.pack(fill="x", padx=PAD, pady=(T.SP.SM, 0), anchor="w")
         # ---- 底行：右对齐按钮先 pack（pack 顺序决定贴边位置）----
         BOTTOM_PAD = (T.SP.MD, PAD)
@@ -1524,13 +1665,15 @@ class CleanerApp(ctk.CTk):
             pass
         self._refresh_sel_buttons()
 
-    def _refresh_card_state(self, card, cb, var, accent_color):
+    def _refresh_card_state(self, card, cb, var, accent_color, rule=None):
         """根据勾选状态刷新卡片（仅描边）与选择记录。
 
         v4.0：描边由 widgets.draw_card_shell 以内缩坐标绘制（tag=card_border），
         这里只改 outline 颜色 —— 绝不使用 CTk 的 border_width（其字形外溢
         就是「卡片彩色边缘」的根因）。选中态不再绘制左侧竖条（用户反馈小蓝条
         显杂乱），仅靠「强调色描边 + 复选框」双重编码，视觉更干净。
+
+        rule 可显式传入（调用方本就在作用域内），省去每次勾选的线性查找。
         """
         try:
             on = var.get() == "on"
@@ -1541,14 +1684,20 @@ class CleanerApp(ctk.CTk):
                 # 选中：强调色描边（混 45%，醒目但不刺眼）；未选中：常驻细描边
                 ec = (_mix_color(config.C_GLASS_BORDER, accent_color, 0.45)
                       if on else config.C_GLASS_BORDER)
+                # 记录当前描边色：窗口尺寸变化触发 shell 重绘时保持选中态
+                try:
+                    card._current_border = ec
+                except Exception:
+                    pass
                 try:
                     canvas.itemconfig("card_border", outline=ec)
                 except Exception:
                     pass
             except Exception:
                 pass
-            rule = next((it["rule"] for it in self.row_widgets
-                         if it["card"] is card), None)
+            if rule is None:
+                rule = next((it["rule"] for it in self.row_widgets
+                             if it["card"] is card), None)
             if rule is not None and rule.get("key") is not None:
                 self._sel_state[rule["key"]] = on
         except Exception:

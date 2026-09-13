@@ -295,10 +295,13 @@ def draw_card_shell(card, *, fg=None, radius=T.R.LG, border=None,
             dark = _is_dark(fg)
 
             # 内缩描边：坐标严格 >= 2.0，smooth 曲线不会凸出到边界外
-            if border:
+            # 颜色优先取 _current_border（选中态强调色由外部维护），
+            # 否则尺寸变化重绘会把选中描边重置回默认色
+            border_now = getattr(card, "_current_border", None) or border
+            if border_now:
                 cv.create_polygon(
                     rounded_poly(INSET, INSET, w - INSET, h - INSET, r),
-                    smooth=True, fill="", outline=border, width=1,
+                    smooth=True, fill="", outline=border_now, width=1,
                     tags=("shell", "card_border"))
 
             side = max(6, r + 4)
@@ -321,21 +324,38 @@ def draw_card_shell(card, *, fg=None, radius=T.R.LG, border=None,
 
 
 def _schedule_shell_draw(card, draw):
-    """延迟 + 尺寸变化时重绘描边（保证在布局完成后才绘制）。"""
-    def once():
-        draw()
+    """布局完成后绘制；尺寸变化时防抖重绘。
+
+    原实现只响应前 3 次 <Configure> —— 启动期用完后，窗口拉伸时
+    描边/高光/阴影永远停留在旧尺寸（卡片边线断开、高光短线）。
+    现改为 after_idle 防抖：同帧多次 Configure 合并一次，且尺寸
+    未变时直接跳过，滚动/悬停零开销，拖拽窗口时描边始终贴合。
+    """
     try:
-        card.after(50, once)
+        card.after(50, draw)
     except Exception:
         pass
-    # 首次映射 / 尺寸变化时再画一次（after 可能早于布局完成）
-    state = {"n": 0}
+    state = {"pending": False, "size": None}
+
+    def run():
+        state["pending"] = False
+        try:
+            size = (card.winfo_width(), card.winfo_height())
+        except Exception:
+            return
+        if size == state["size"]:
+            return
+        state["size"] = size
+        draw()
 
     def on_conf(_e=None):
-        if state["n"] >= 3:
+        if state["pending"]:
             return
-        state["n"] += 1
-        draw()
+        state["pending"] = True
+        try:
+            card.after_idle(run)
+        except Exception:
+            state["pending"] = False
 
     try:
         card.bind("<Configure>", on_conf, add="+")
@@ -407,6 +427,7 @@ def animate_card_entrance(card, accent=None, selected=True, delay=0):
             try:
                 if not card.winfo_exists():
                     return False
+                card._current_border = color   # 尺寸重绘时保持该描边色
                 card._canvas.itemconfig("card_border", outline=color)
                 return True
             except Exception:
@@ -443,19 +464,26 @@ def animate_card_entrance(card, accent=None, selected=True, delay=0):
         pass
 
 
+# 主列表卡片高度（逻辑单位）：骨架屏与真实卡片共用，
+# 若两者不一致，首批结果落地时整页会纵向跳动一下。
+CARD_H = 156
+
+
 def make_skeleton_cards(parent, count=6):
     """骨架占位卡（v4.2 新增）：扫描时先秒出占位，避免“点击后界面冻住”的感觉。
 
     每张仅 4 个纯色条（无绑定、无 hover、无 shell 重绘），6 张共 ~24 个控件，
     建卡 <10ms；配合 start_skeleton_shimmer 的单一定时器呼吸脉冲，
     用户感知为“正在加载”而非“卡死”。返回 (cards, bars) 供启停/销毁。
+
+    高度与真实卡片（CARD_H）一致：骨架→真实卡片无缝替换，不发生纵向跳动。
     """
     cards = []
     bars = []
     try:
         for _ in range(count):
             card = ctk.CTkFrame(parent, fg_color=config.C_GLASS,
-                                corner_radius=T.R.LG, height=110,
+                                corner_radius=T.R.LG, height=CARD_H,
                                 border_width=0)
             card.pack(fill="x", padx=6, pady=5)
             card.pack_propagate(False)
@@ -988,9 +1016,11 @@ class NavItem:
             cv.delete("nav_accent")
             if not self.active:
                 return
-            h = self.frame.winfo_height() or T.H.NAV
+            h = self.frame.winfo_height()
             if h <= 8:
-                return
+                # 未完成布局（首次绘制早于映射）：按设计高度补画，
+                # 否则选中项的强调竖条要等一次悬停才会出现
+                h = T.H.NAV
             # 竖条居中、上下各留 9px，圆角胶囊形
             cv.create_polygon(
                 rounded_poly(0, 9, 3, h - 9, 1.5),
